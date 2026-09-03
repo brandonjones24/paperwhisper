@@ -26,6 +26,23 @@ It matches each ebook to an audiobook by fuzzy **title + author**, converts the
 source position to a fraction, and maps it onto the target's own scale
 (`fraction × audiobook_duration`, or `fraction × ebook_pageCount`).
 
+## Ebook providers
+
+The ebook side is pluggable (`EBOOK_PROVIDER`), so you **don't need a reMarkable** to
+use paperwhisper:
+
+| Provider | Reads progress from | Directions |
+|---|---|---|
+| **`remarkable`** (default) | rmfakecloud sync store (`lastOpenedPage`) | ebook↔audio |
+| **`calibreweb`** | Calibre-Web's KOReader **`kosync`** progress (`app.db`) | ebook→audio |
+
+The `calibreweb` provider maps KOReader's per-document reading `percentage` to a
+book by recomputing KOReader's *partial-MD5* over your Calibre library files
+(`CALIBRE_LIBRARY` may list several libraries, comma-separated; titles/authors come
+from each `metadata.db`). So if you read on **KOReader / Kindle / Kobo** synced to
+Calibre-Web and listen in Audiobookshelf, your audiobook keeps up with your reading.
+It is read-only on the Calibre-Web side (writing progress back is not implemented yet).
+
 ## Honest limitations
 
 - **Mapping is percentage-based, not word-accurate.** Real Whispersync uses a
@@ -118,9 +135,9 @@ root                -> hash of the root index blob
 ## Roadmap
 
 - Chapter-aware mapping (EPUB TOC ↔ audiobook chapters) for better accuracy.
-- **A Calibre-Web / KOReader (kosync) provider** so people without a reMarkable can
-  bridge their ebook reading progress to Audiobookshelf.
-- Match caching / manual match overrides; Prometheus metrics.
+- Write-back for the `calibreweb` provider (audio → Calibre-Web reading position).
+- Hash-index caching for large Calibre libraries; manual match overrides.
+- Prometheus metrics.
 
 ## License
 
