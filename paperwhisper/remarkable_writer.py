@@ -52,6 +52,18 @@ def _rollup(children: list[tuple[str, str]]) -> str:
     return h.hexdigest()
 
 
+def _index_hash(schema: str, body: bytes, entries: list["Entry"]) -> str:
+    """Hash for an index blob.
+
+    Verified empirically against a live store:
+      * schema 3 (document index) -> Merkle rollup of the child hashes
+      * schema 4 (root index)     -> sha256 of the raw index content
+    """
+    if schema == "4":
+        return _sha256_hex(body)
+    return _rollup([(e.hash, e.name) for e in entries])
+
+
 class Entry:
     __slots__ = ("hash", "type", "name", "subfiles", "size")
 
@@ -66,21 +78,40 @@ class Entry:
         return f"{self.hash}:{self.type}:{self.name}:{self.subfiles}:{self.size}"
 
 
-def _parse_index(text: str) -> list[Entry]:
+def _parse_index(text: str) -> tuple[str, list[Entry]]:
+    """Return ``(schema_version, entries)``.
+
+    Schema 3 (document index):  "3\\n" then file lines.
+    Schema 4 (root index):      "4\\n" then a summary line ``0:.:<count>:<size>``
+                                then document lines.
+    The summary line (4 colon-fields, name ".") is skipped here and regenerated
+    on serialize.
+    """
+    lines = text.splitlines()
+    schema = lines[0].strip() if lines and lines[0].strip().isdigit() else SCHEMA_VERSION
     entries = []
-    for ln in text.splitlines():
+    for ln in lines[1:]:
         ln = ln.strip()
-        if not ln or ln == SCHEMA_VERSION or ln.isdigit():
+        if not ln:
             continue
         p = ln.split(":")
+        if len(p) == 4 and p[1] == ".":
+            continue  # schema-4 summary line, regenerated on serialize
         if len(p) >= 5:
             entries.append(Entry(p[0], p[1], p[2], p[3], p[4]))
-    return entries
+    return schema, entries
 
 
-def _serialize_index(entries: list[Entry]) -> bytes:
+def _serialize_index(schema: str, entries: list[Entry]) -> bytes:
+    """Serialize preserving the source schema. Schema 4 gets the regenerated
+    ``0:.:<count>:<total_size>`` summary line; schema 3 does not."""
     entries = sorted(entries, key=lambda e: e.name)
-    body = SCHEMA_VERSION + "\n" + "".join(e.line() + "\n" for e in entries)
+    if schema == "4":
+        total = sum(e.size for e in entries)
+        header = f"4\n0:.:{len(entries)}:{total}\n"
+    else:
+        header = schema + "\n"
+    body = header + "".join(e.line() + "\n" for e in entries)
     return body.encode()
 
 
@@ -155,14 +186,14 @@ class RemarkableSyncWriter:
         Returns True if a write was performed. Raises ConflictError on a
         generation clash (caller should re-read and retry)."""
         root_hash, generation = self.get_root()
-        root_entries = _parse_index(self.get_blob(root_hash).decode(errors="replace"))
+        root_schema, root_entries = _parse_index(self.get_blob(root_hash).decode(errors="replace"))
 
         doc_entry = next((e for e in root_entries if e.name == doc_id), None)
         if doc_entry is None:
             log.warning("doc %s not found in root index", doc_id)
             return False
 
-        file_entries = _parse_index(self.get_blob(doc_entry.hash).decode(errors="replace"))
+        doc_schema, file_entries = _parse_index(self.get_blob(doc_entry.hash).decode(errors="replace"))
         targets = [".metadata"] + ([".content"] if also_content else [])
         changed = False
 
@@ -187,16 +218,16 @@ class RemarkableSyncWriter:
             log.info("doc %s already at page %d; nothing to write", doc_id, page)
             return False
 
-        # rebuild the doc index blob (stored under its rollup hash)
-        doc_body = _serialize_index(file_entries)
-        new_doc_hash = _rollup([(e.hash, e.name) for e in file_entries])
+        # rebuild the doc index blob (schema 3 -> hashed by Merkle rollup of files)
+        doc_body = _serialize_index(doc_schema, file_entries)
+        new_doc_hash = _index_hash(doc_schema, doc_body, file_entries)
         self.put_blob(new_doc_hash, doc_body, filename=doc_id + ".docSchema")
         doc_entry.hash = new_doc_hash
         doc_entry.size = sum(e.size for e in file_entries)
 
-        # rebuild the root index blob
-        root_body = _serialize_index(root_entries)
-        new_root_hash = _rollup([(e.hash, e.name) for e in root_entries])
+        # rebuild the root index blob (schema 4 -> keeps summary line, hashed by content)
+        root_body = _serialize_index(root_schema, root_entries)
+        new_root_hash = _index_hash(root_schema, root_body, root_entries)
         self.put_blob(new_root_hash, root_body, filename="root.docSchema")
 
         new_gen = self.update_root(new_root_hash, generation, broadcast=True)
