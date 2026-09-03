@@ -2,7 +2,7 @@ services:
   paperwhisper:
     build: .
     # or, once published:
-    # image: ghcr.io/CHANGEME/paperwhisper:latest
+    # image: ghcr.io/brandonjones24/paperwhisper:latest
     container_name: paperwhisper
     restart: unless-stopped
     environment:

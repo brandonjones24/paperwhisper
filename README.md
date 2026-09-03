@@ -50,7 +50,7 @@ self-hosted take on Kindle/Audible Whispersync.
 ## Quick start
 
 ```bash
-git clone https://github.com/CHANGEME/paperwhisper.git
+git clone https://github.com/brandonjones24/paperwhisper.git
 cd paperwhisper
 cp .env.example .env      # edit RMFAKECLOUD_USER, ABS_URL, ABS_TOKEN
 # point the rmdata volume at your rmfakecloud data dir in docker-compose.example.yml
