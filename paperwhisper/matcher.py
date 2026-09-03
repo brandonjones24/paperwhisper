@@ -35,8 +35,21 @@ def _author_key(name: str) -> set[str]:
     return {t for t in tokens if len(t) > 1}
 
 
+def _title_tokens(text: str) -> set[str]:
+    return {t for t in normalize(text).split() if t}
+
+
 def title_ratio(a: str, b: str) -> float:
-    return SequenceMatcher(None, normalize(a), normalize(b)).ratio()
+    """Blend sequence similarity with token-set (Jaccard) overlap.
+
+    Sequence similarity alone over-scores same-series titles that share a long
+    boilerplate prefix ("Harry Potter and the ... of ..."); the Jaccard term
+    keys on the *distinctive* words, pulling those false matches back down.
+    """
+    seq = SequenceMatcher(None, normalize(a), normalize(b)).ratio()
+    ta, tb = _title_tokens(a), _title_tokens(b)
+    jac = len(ta & tb) / len(ta | tb) if (ta | tb) else 0.0
+    return (seq + jac) / 2
 
 
 def author_overlap(a: str, b: str) -> float:
@@ -47,10 +60,15 @@ def author_overlap(a: str, b: str) -> float:
 
 
 def score(rm_title: str, rm_author: str, abs_title: str, abs_author: str) -> float:
-    """Combined 0-1 match score. Title dominates, author refines."""
+    """Combined 0-1 match score.
+
+    Title *dominates* and author only modestly scales it, so two books by the
+    same author in the same series (e.g. different Harry Potter titles) are NOT
+    matched to each other on the strength of the shared author alone.
+    """
     t = title_ratio(rm_title, abs_title)
     a = author_overlap(rm_author, abs_author)
-    return round(0.75 * t + 0.25 * a, 4)
+    return round(t * (0.8 + 0.2 * a), 4)
 
 
 def best_match(rm_title, rm_author, candidates, key_title, key_author, threshold=0.72):

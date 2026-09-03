@@ -7,13 +7,24 @@ services:
     restart: unless-stopped
     environment:
       - RMFAKECLOUD_USER=changeme
-      - ABS_URL=http://audiobookshelf:80
+      - ABS_URL=http://audiobookshelf:13378
       - ABS_TOKEN=${ABS_TOKEN}
+
+      # ebook_to_audio (default, read-only on the reMarkable side):
       - DIRECTION=ebook_to_audio
+
+      # For audio_to_ebook instead, set:
+      #   - DIRECTION=audio_to_ebook
+      #   - RMFAKECLOUD_URL=http://rmfakecloud:3050
+      #   - RMFAKECLOUD_DEVICE_TOKEN=${RMFAKECLOUD_DEVICE_TOKEN}
+      #   (or mount an rmapi.conf and set RMAPI_CONFIG=/rmapi/rmapi.conf)
+
       - INTERVAL=300
       - DRY_RUN=true            # flip to false once matches look right
       - LOG_LEVEL=INFO
     volumes:
-      # rmfakecloud data dir (READ-ONLY). Point at the host path that contains users/<user>/sync
+      # rmfakecloud data dir (READ-ONLY). Point at the host path containing users/<user>/sync
       - /path/to/rmfakecloud/data:/rmdata:ro
       - ./state:/state
+      # For audio_to_ebook with RMAPI_CONFIG, also mount your rmapi config dir:
+      # - /path/to/rmapi-config:/rmapi:ro
