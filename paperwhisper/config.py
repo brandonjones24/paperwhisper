@@ -62,6 +62,11 @@ class Config:
     abs_token: str = ""
     abs_verify_tls: bool = True
 
+    ebook_provider: str = "remarkable"   # remarkable | calibreweb
+    calibre_library: str = ""
+    cwa_app_db: str = ""
+    cwa_user_id: int = 0
+
     direction: str = "ebook_to_audio"
     interval: int = 300
     dry_run: bool = True
@@ -83,6 +88,11 @@ class Config:
         self.abs_url = os.getenv("ABS_URL", "")
         self.abs_token = os.getenv("ABS_TOKEN", "")
         self.abs_verify_tls = _bool("ABS_VERIFY_TLS", True)
+
+        self.ebook_provider = os.getenv("EBOOK_PROVIDER", "remarkable").lower()
+        self.calibre_library = os.getenv("CALIBRE_LIBRARY", "")
+        self.cwa_app_db = os.getenv("CWA_APP_DB", "")
+        self.cwa_user_id = _int("CWA_USER_ID", 0)
 
         self.direction = os.getenv("DIRECTION", "ebook_to_audio")
         self.interval = _int("INTERVAL", 300)
@@ -106,6 +116,15 @@ class Config:
             errs.append("ABS_TOKEN is required")
         if self.direction not in DIRECTIONS:
             errs.append(f"DIRECTION={self.direction!r} must be one of {sorted(DIRECTIONS)}")
+        if self.ebook_provider not in {"remarkable", "calibreweb"}:
+            errs.append(f"EBOOK_PROVIDER={self.ebook_provider!r} must be 'remarkable' or 'calibreweb'")
+        if self.ebook_provider == "calibreweb":
+            if not self.calibre_library:
+                errs.append("CALIBRE_LIBRARY is required for the calibreweb provider")
+            if not self.cwa_app_db:
+                errs.append("CWA_APP_DB is required for the calibreweb provider")
+            if self.direction == "audio_to_ebook":
+                errs.append("the calibreweb provider only supports DIRECTION=ebook_to_audio (writing back to Calibre-Web is not implemented yet)")
         if self.direction == "audio_to_ebook":
             if not self.rmfakecloud_url:
                 errs.append("RMFAKECLOUD_URL is required for audio_to_ebook")

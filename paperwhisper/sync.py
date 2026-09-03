@@ -52,12 +52,20 @@ class State:
             log.warning("could not persist state to %s: %s", self.path, e)
 
 
-def _match_ab(book: RemarkableBook, audiobooks: list[ABSItem], threshold: float):
+def _match_ab(book, audiobooks: list[ABSItem], threshold: float):
     return best_match(
         book.title, book.author, audiobooks,
         key_title=lambda a: a.title, key_author=lambda a: a.author,
         threshold=threshold,
     )
+
+
+def get_ebook_provider(cfg: Config):
+    """The ebook reading-progress source for ebook_to_audio."""
+    if cfg.ebook_provider == "calibreweb":
+        from .calibreweb import CalibreWebStore
+        return CalibreWebStore(cfg.cwa_app_db, cfg.calibre_library, cfg.cwa_user_id or None)
+    return RemarkableStore(cfg.rmfakecloud_data, cfg.rmfakecloud_user)
 
 
 def run_once(cfg: Config) -> int:
@@ -70,15 +78,16 @@ def run_once(cfg: Config) -> int:
 # ebook -> audio                                                              #
 # --------------------------------------------------------------------------- #
 def _run_ebook_to_audio(cfg: Config) -> int:
-    store = RemarkableStore(cfg.rmfakecloud_data, cfg.rmfakecloud_user)
+    provider = get_ebook_provider(cfg)
     abs_client = AudiobookshelfClient(cfg.abs_url, cfg.abs_token, verify_tls=cfg.abs_verify_tls)
     if not abs_client.ping():
         log.error("Audiobookshelf not reachable / token invalid; aborting pass")
         return 0
 
     audiobooks = abs_client.audiobooks()
-    ebooks = store.books_with_progress()
-    log.info("ebook->audio: %d audiobooks, %d ebook(s) with progress", len(audiobooks), len(ebooks))
+    ebooks = provider.progress_items()  # [EbookProgress(ident, title, author, progress)]
+    log.info("ebook->audio (%s): %d audiobooks, %d ebook(s) with progress",
+             cfg.ebook_provider, len(audiobooks), len(ebooks))
 
     state = State(cfg.state_file)
     updates = 0
@@ -90,7 +99,8 @@ def _run_ebook_to_audio(cfg: Config) -> int:
             if not match:
                 log.info("no audiobook match for %r (best %.2f)", book.title, s)
             continue
-        if self_unchanged(state, book.uuid, "ebook_page", book.last_opened_page):
+        frac = round(book.progress, 4)
+        if self_unchanged(state, book.ident, "ebook_frac", frac):
             continue
 
         target = book.progress * match.duration
@@ -100,7 +110,7 @@ def _run_ebook_to_audio(cfg: Config) -> int:
         if not cfg.allow_rewind and target < match.current_time:
             log.info("skip: would rewind %r (%.0fs < %.0fs); set ALLOW_REWIND=true to override",
                      match.title, target, match.current_time)
-            state.record(book.uuid, ebook_page=book.last_opened_page)
+            state.record(book.ident, ebook_frac=frac)
             continue
         if delta >= cfg.min_delta:
             if cfg.dry_run:
@@ -112,7 +122,7 @@ def _run_ebook_to_audio(cfg: Config) -> int:
                     log.error("failed to update %r: %s", match.title, e)
                     continue
             updates += 1
-        state.record(book.uuid, ebook_page=book.last_opened_page)
+        state.record(book.ident, ebook_frac=frac)
     state.save()
     log.info("pass complete: %d update(s)%s", updates, " (dry-run)" if cfg.dry_run else "")
     return updates

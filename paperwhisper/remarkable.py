@@ -177,6 +177,14 @@ class RemarkableStore:
         """Books the reader has actually opened past page 0."""
         return [b for b in self.books() if b.last_opened_page > 0 and b.progress > 0]
 
+    def progress_items(self):
+        """Shared EbookProgress view (for the ebook_to_audio provider interface)."""
+        from .providers import EbookProgress
+        return [
+            EbookProgress(ident=b.uuid, title=b.title, author=b.author, progress=b.progress)
+            for b in self.books_with_progress()
+        ]
+
 
 def _strip_author(visible_name: str) -> str:
     """``"Title - Author"`` visibleName -> best-effort title."""
