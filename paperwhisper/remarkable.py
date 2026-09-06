@@ -44,6 +44,7 @@ class RemarkableBook:
     page_count: int = 0
     last_opened_page: int = 0
     last_modified_ms: int = 0
+    epub_hash: str = ""
 
     @property
     def progress(self) -> float:
@@ -66,14 +67,24 @@ class RemarkableStore:
 
     # -- low level blob access -------------------------------------------------
 
-    def _read_text(self, blob_hash: str) -> str | None:
+    def _read_bytes(self, blob_hash: str) -> bytes | None:
         if not blob_hash:
             return None
         try:
-            return (self.sync_dir / blob_hash).read_text(errors="replace")
+            return (self.sync_dir / blob_hash).read_bytes()
         except OSError as e:
             log.debug("cannot read blob %s: %s", blob_hash, e)
             return None
+
+    def _read_text(self, blob_hash: str) -> str | None:
+        raw = self._read_bytes(blob_hash)
+        if raw is None:
+            return None
+        return raw.decode("utf-8", errors="replace")
+
+    def epub_bytes(self, book: RemarkableBook) -> bytes | None:
+        """Raw ``.epub`` blob for TOC parsing, or None (PDF / missing)."""
+        return self._read_bytes(book.epub_hash) if book.epub_hash else None
 
     def _read_json(self, blob_hash: str) -> dict | None:
         raw = self._read_text(blob_hash)
@@ -172,6 +183,7 @@ class RemarkableStore:
                     page_count=page_count,
                     last_opened_page=opened_page_from_doc(meta, content),
                     last_modified_ms=last_modified,
+                    epub_hash=files.get("epub", "") or "",
                 )
             )
         return out

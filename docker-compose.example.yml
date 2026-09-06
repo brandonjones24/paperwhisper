@@ -22,6 +22,9 @@ services:
       - INTERVAL=300            # backup poll; audio_to_ebook also listens to ABS Socket.io
       - DRY_RUN=true            # flip to false once matches look right
       - LOG_LEVEL=INFO
+      # CHAPTER_MAP=true        # ABS chapters ↔ EPUB TOC (falls back to percent)
+      # PAGE_LAG=1              # land 1 page behind so you turn forward
+      # AUDIO_LAG=15            # land 15s behind on the audiobook side
       # audio_to_ebook events (defaults on for that direction):
       # - ABS_EVENTS=true
       # - EVENT_DEBOUNCE=20

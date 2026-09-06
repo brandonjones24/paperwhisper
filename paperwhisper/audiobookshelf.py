@@ -16,6 +16,13 @@ log = logging.getLogger("paperwhisper.abs")
 
 
 @dataclass
+class ABSChapter:
+    title: str
+    start: float  # seconds
+    end: float
+
+
+@dataclass
 class ABSItem:
     id: str
     title: str
@@ -33,6 +40,7 @@ class AudiobookshelfClient:
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {token}"})
         self.session.verify = verify_tls
+        self._chapter_cache: dict[str, list[ABSChapter]] = {}
 
     def _get(self, path: str, **params):
         r = self.session.get(urljoin(self.base, path), params=params, timeout=self.timeout)
@@ -95,6 +103,26 @@ class AudiobookshelfClient:
                 page += 1
         return items
 
+    def chapters(self, item_id: str) -> list[ABSChapter]:
+        """Chapter markers for a library item (empty if ABS has none)."""
+        if item_id in self._chapter_cache:
+            return self._chapter_cache[item_id]
+        try:
+            data = self._get(f"api/items/{item_id}", expanded=1)
+        except requests.RequestException as e:
+            log.warning("ABS chapters fetch failed for %s: %s", item_id, e)
+            self._chapter_cache[item_id] = []
+            return []
+        media = data.get("media") or {}
+        duration = float(media.get("duration") or 0.0)
+        out = parse_abs_chapters(media.get("chapters") or [], duration)
+        if not out:
+            out = chapters_from_audio_files(media.get("audioFiles") or [], duration)
+        self._chapter_cache[item_id] = out
+        if out:
+            log.debug("ABS %s: %d chapter(s)", item_id, len(out))
+        return out
+
     # -- writes ----------------------------------------------------------------
 
     def set_progress(self, item_id: str, current_time: float, duration: float) -> None:
@@ -108,3 +136,64 @@ class AudiobookshelfClient:
         }
         self._patch(f"api/me/progress/{item_id}", payload)
         log.info("ABS progress set: item=%s -> %.1fs (%.1f%%)", item_id, current_time, progress * 100)
+
+
+def parse_abs_chapters(raw, duration: float = 0.0) -> list[ABSChapter]:
+    """Normalise ABS ``media.chapters`` (missing ``end`` → next start / duration)."""
+    if not raw:
+        return []
+    rows = []
+    for ch in raw:
+        if not isinstance(ch, dict):
+            continue
+        title = str(ch.get("title") or "").strip() or "Chapter"
+        try:
+            start = float(ch.get("start") if ch.get("start") is not None else ch.get("startTime") or 0.0)
+        except (TypeError, ValueError):
+            start = 0.0
+        end_raw = ch.get("end") if ch.get("end") is not None else ch.get("endTime")
+        try:
+            end = float(end_raw) if end_raw is not None else 0.0
+        except (TypeError, ValueError):
+            end = 0.0
+        rows.append((title, start, end))
+    out: list[ABSChapter] = []
+    for i, (title, start, end) in enumerate(rows):
+        if end <= start:
+            if i + 1 < len(rows):
+                end = rows[i + 1][1]
+            else:
+                end = duration or start
+        if end <= start:
+            end = start + 1.0
+        out.append(ABSChapter(title=title, start=start, end=end))
+    if out and duration and out[-1].end < duration:
+        out[-1].end = duration
+    return out
+
+
+def chapters_from_audio_files(files, duration: float = 0.0) -> list[ABSChapter]:
+    """Fallback when ABS has no chapter markers: one chapter per audio file."""
+    if not files:
+        return []
+    out: list[ABSChapter] = []
+    t = 0.0
+    for i, f in enumerate(files):
+        if not isinstance(f, dict):
+            continue
+        md = f.get("metadata") or {}
+        title = str(md.get("title") or f.get("title") or f"Track {i + 1}").strip()
+        try:
+            start = float(f.get("startOffset") if f.get("startOffset") is not None else t)
+        except (TypeError, ValueError):
+            start = t
+        try:
+            dur = float(f.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        end = start + dur if dur else start
+        out.append(ABSChapter(title=title, start=start, end=end))
+        t = end
+    if out and duration and out[-1].end < duration:
+        out[-1].end = duration
+    return out if len(out) >= 2 else []

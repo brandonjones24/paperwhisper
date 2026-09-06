@@ -8,9 +8,10 @@ Two directions, dispatched by ``Config.direction``:
   audio_to_ebook  Audiobookshelf listen position -> reMarkable reading position
                   (ABS read-only; reMarkable written via rmfakecloud sync API)
 
-Position mapping is percentage-based: fraction(source) maps to the target's
-own scale (audiobook seconds, or ebook pages). This is an approximation —
-"resume roughly where I left off", not word-accurate Whispersync.
+Position mapping prefers ABS chapters paired with the EPUB table of contents,
+interpolating inside the matched chapter. If they don't pair, it falls back
+to a percentage with a small conservative lag so the target is slightly
+behind the source.
 """
 
 from __future__ import annotations
@@ -21,9 +22,10 @@ from pathlib import Path
 
 from .audiobookshelf import ABSItem, AudiobookshelfClient
 from .config import Config
+from .mapping import PositionMapper, percent_to_page
 from .matcher import best_match
 from .mqttpub import emit as mqtt_emit
-from .remarkable import RemarkableBook, RemarkableStore
+from .remarkable import RemarkableStore
 from .remarkable_writer import ConflictError, RemarkableSyncWriter
 
 log = logging.getLogger("paperwhisper.sync")
@@ -79,19 +81,29 @@ def run_once(cfg: Config) -> int:
 # ebook -> audio                                                              #
 # --------------------------------------------------------------------------- #
 def _run_ebook_to_audio(cfg: Config) -> int:
-    provider = get_ebook_provider(cfg)
     abs_client = AudiobookshelfClient(cfg.abs_url, cfg.abs_token, verify_tls=cfg.abs_verify_tls)
     if not abs_client.ping():
         log.error("Audiobookshelf not reachable / token invalid; aborting pass")
         return 0
 
     audiobooks = abs_client.audiobooks()
-    ebooks = provider.progress_items()  # [EbookProgress(ident, title, author, progress)]
+    state = State(cfg.state_file)
+    updates = 0
+
+    if cfg.ebook_provider == "remarkable":
+        store = RemarkableStore(cfg.rmfakecloud_data, cfg.rmfakecloud_user)
+        mapper = PositionMapper.from_config(cfg, abs_client, store)
+        ebooks = store.books_with_progress()
+        ident_of = lambda b: b.uuid  # noqa: E731
+    else:
+        store = None
+        mapper = PositionMapper.from_config(cfg, abs_client, None)
+        ebooks = get_ebook_provider(cfg).progress_items()
+        ident_of = lambda b: b.ident  # noqa: E731
+
     log.info("ebook->audio (%s): %d audiobooks, %d ebook(s) with progress",
              cfg.ebook_provider, len(audiobooks), len(ebooks))
 
-    state = State(cfg.state_file)
-    updates = 0
     for book in ebooks:
         if book.progress < cfg.min_progress:
             continue
@@ -100,18 +112,26 @@ def _run_ebook_to_audio(cfg: Config) -> int:
             if not match:
                 log.info("no audiobook match for %r (best %.2f)", book.title, s)
             continue
+        ident = ident_of(book)
         frac = round(book.progress, 4)
-        if self_unchanged(state, book.ident, "ebook_frac", frac):
+        if self_unchanged(state, ident, "ebook_frac", frac):
             continue
 
-        target = book.progress * match.duration
+        if store is not None:
+            mapped = mapper.page_to_seconds(book, match)
+        else:
+            mapped = mapper.progress_to_seconds(book.progress, match.duration)
+        target = mapped.seconds if mapped.seconds is not None else book.progress * match.duration
         delta = abs(target - match.current_time) / match.duration
-        log.info("MATCH %r<->%r (%.0f%%) ebook %.1f%% -> %.0fs (abs %.0fs, d%.1f%%)",
-                 book.title, match.title, s * 100, book.progress * 100, target, match.current_time, delta * 100)
+        log.info(
+            "MATCH %r<->%r (%.0f%%) ebook %.1f%% -> %.0fs (abs %.0fs, d%.1f%%) [%s]",
+            book.title, match.title, s * 100, book.progress * 100, target,
+            match.current_time, delta * 100, mapped.describe(),
+        )
         if not cfg.allow_rewind and target < match.current_time:
-            log.info("skip: would rewind %r (%.0fs < %.0fs); set ALLOW_REWIND=true to override",
-                     match.title, target, match.current_time)
-            state.record(book.ident, ebook_frac=frac)
+            log.debug("skip: would rewind %r (%.0fs < %.0fs); set ALLOW_REWIND=true to override",
+                      match.title, target, match.current_time)
+            state.record(ident, ebook_frac=frac)
             continue
         if delta >= cfg.min_delta:
             if cfg.dry_run:
@@ -128,9 +148,9 @@ def _run_ebook_to_audio(cfg: Config) -> int:
                 "progress_pct": round(book.progress * 100, 1),
                 "updates": updates,
                 "dry_run": cfg.dry_run,
-                "detail": f"ebook {book.progress:.1%} -> {target:.0f}s",
+                "detail": f"ebook {book.progress:.1%} -> {target:.0f}s [{mapped.describe()}]",
             })
-        state.record(book.ident, ebook_frac=frac)
+        state.record(ident, ebook_frac=frac)
     state.save()
     log.info("pass complete: %d update(s)%s", updates, " (dry-run)" if cfg.dry_run else "")
     return updates
@@ -152,6 +172,7 @@ def _run_audio_to_ebook(cfg: Config) -> int:
     log.info("audio->ebook: %d audiobooks, %d ebook(s) with page counts", len(audiobooks), len(ebooks))
 
     writer = RemarkableSyncWriter(cfg.rmfakecloud_url, cfg.rmfakecloud_device_token)
+    mapper = PositionMapper.from_config(cfg, abs_client, store)
     state = State(cfg.state_file)
     updates = 0
 
@@ -160,20 +181,21 @@ def _run_audio_to_ebook(cfg: Config) -> int:
         if not match or match.progress < cfg.min_progress:
             continue
 
-        target_page = round(match.progress * book.page_count)
+        mapped = mapper.audio_to_page(match, book)
+        target_page = mapped.page if mapped.page is not None else percent_to_page(match.progress, book.page_count, cfg.page_lag)
         if abs(target_page - book.last_opened_page) < cfg.min_page_delta:
             continue
         if not cfg.allow_rewind and target_page < book.last_opened_page:
-            log.info("skip: would rewind %r (page %d < %d); set ALLOW_REWIND=true to override",
-                     book.title, target_page, book.last_opened_page)
+            log.debug("skip: would rewind %r (page %d < %d); set ALLOW_REWIND=true to override",
+                      book.title, target_page, book.last_opened_page)
             continue
         # skip if we already pushed this audiobook position for this book
         if self_unchanged(state, book.uuid, "abs_current", round(match.current_time)):
             continue
 
-        log.info("MATCH %r<->%r (%.0f%%) audio %.1f%% -> ebook page %d/%d (was %d)",
+        log.info("MATCH %r<->%r (%.0f%%) audio %.1f%% -> ebook page %d/%d (was %d) [%s]",
                  match.title, book.title, s * 100, match.progress * 100,
-                 target_page, book.page_count, book.last_opened_page)
+                 target_page, book.page_count, book.last_opened_page, mapped.describe())
 
         if cfg.dry_run:
             log.info("[DRY_RUN] would set %r to page %d", book.title, target_page)
@@ -188,7 +210,7 @@ def _run_audio_to_ebook(cfg: Config) -> int:
             "progress_pct": round(match.progress * 100, 1),
             "updates": updates,
             "dry_run": cfg.dry_run,
-            "detail": f"audio {match.progress:.1%} -> page {target_page}/{book.page_count}",
+            "detail": f"audio {match.progress:.1%} -> page {target_page}/{book.page_count} [{mapped.describe()}]",
         })
         state.record(book.uuid, abs_current=round(match.current_time), ebook_page=target_page)
 

@@ -75,6 +75,9 @@ class Config:
     min_page_delta: int = 1          # audio_to_ebook: min page move -> reMarkable
     min_progress: float = 0.005      # ignore items barely started
     allow_rewind: bool = False       # if False, only ever advance the target
+    chapter_map: bool = True         # ABS chapters ↔ EPUB TOC when they pair
+    page_lag: int = 1                # land this many pages behind the mapped page
+    audio_lag: float = 15.0          # land this many seconds behind the mapped time
 
     state_file: str = "/state/paperwhisper.json"
     log_level: str = "INFO"
@@ -116,6 +119,9 @@ class Config:
         self.min_page_delta = _int("MIN_PAGE_DELTA", 1)
         self.min_progress = _float("MIN_PROGRESS", 0.005)
         self.allow_rewind = _bool("ALLOW_REWIND", False)
+        self.chapter_map = _bool("CHAPTER_MAP", True)
+        self.page_lag = max(0, _int("PAGE_LAG", 1))
+        self.audio_lag = max(0.0, _float("AUDIO_LAG", 15))
 
         self.state_file = os.getenv("STATE_FILE", "/state/paperwhisper.json")
         self.log_level = os.getenv("LOG_LEVEL", "INFO")

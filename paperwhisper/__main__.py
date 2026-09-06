@@ -29,9 +29,11 @@ def main() -> int:
     use_events = cfg.abs_events and cfg.direction == "audio_to_ebook"
     log.info(
         "paperwhisper starting | direction=%s interval=%ss dry_run=%s "
-        "abs_events=%s debounce=%ss max_wait=%ss user=%s abs=%s",
+        "abs_events=%s debounce=%ss max_wait=%ss chapter_map=%s page_lag=%s "
+        "audio_lag=%ss user=%s abs=%s",
         cfg.direction, cfg.interval, cfg.dry_run, use_events,
-        cfg.event_debounce, cfg.event_max_wait, cfg.rmfakecloud_user, cfg.abs_url,
+        cfg.event_debounce, cfg.event_max_wait, cfg.chapter_map, cfg.page_lag,
+        cfg.audio_lag, cfg.rmfakecloud_user, cfg.abs_url,
     )
     if cfg.dry_run:
         log.info("DRY_RUN is on — no changes will be written. "

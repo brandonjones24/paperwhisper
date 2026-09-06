@@ -32,3 +32,24 @@ def test_abs_events_explicit_false():
     os.environ["ABS_EVENTS"] = "false"
     cfg = Config()
     assert cfg.abs_events is False
+
+
+def test_chapter_map_defaults():
+    for k in ("CHAPTER_MAP", "PAGE_LAG", "AUDIO_LAG"):
+        os.environ.pop(k, None)
+    cfg = Config()
+    assert cfg.chapter_map is True
+    assert cfg.page_lag == 1
+    assert cfg.audio_lag == 15
+
+
+def test_chapter_map_env():
+    os.environ["CHAPTER_MAP"] = "false"
+    os.environ["PAGE_LAG"] = "2"
+    os.environ["AUDIO_LAG"] = "30"
+    cfg = Config()
+    assert cfg.chapter_map is False
+    assert cfg.page_lag == 2
+    assert cfg.audio_lag == 30
+    for k in ("CHAPTER_MAP", "PAGE_LAG", "AUDIO_LAG"):
+        os.environ.pop(k, None)
