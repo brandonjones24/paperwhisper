@@ -15,6 +15,15 @@ import requests
 log = logging.getLogger("paperwhisper.abs")
 
 
+def _progress_ts_ms(pr: dict) -> int:
+    raw = pr.get("lastUpdate") or pr.get("lastUpdated") or pr.get("updatedAt") or 0
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+    return v if v > 1e12 else v * 1000
+
+
 @dataclass
 class ABSChapter:
     title: str
@@ -31,6 +40,7 @@ class ABSItem:
     current_time: float = 0.0  # seconds listened
     progress: float = 0.0      # 0.0-1.0
     is_finished: bool = False
+    last_update_ms: int = 0
 
 
 class AudiobookshelfClient:
@@ -96,6 +106,7 @@ class AudiobookshelfClient:
                             current_time=float(pr.get("currentTime") or 0.0),
                             progress=float(pr.get("progress") or 0.0),
                             is_finished=bool(pr.get("isFinished")),
+                            last_update_ms=_progress_ts_ms(pr),
                         )
                     )
                 if len(results) < 200:

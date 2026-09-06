@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-DIRECTIONS = {"ebook_to_audio", "audio_to_ebook"}
+DIRECTIONS = {"all", "ebook_to_audio", "audio_to_ebook"}
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -62,12 +62,16 @@ class Config:
     abs_token: str = ""
     abs_verify_tls: bool = True
 
-    ebook_provider: str = "remarkable"   # remarkable | calibreweb
+    ebook_provider: str = "remarkable"   # deprecated: backends enable themselves
     calibre_library: str = ""
     cwa_app_db: str = ""
     cwa_user_id: int = 0
+    cwa_url: str = ""
+    cwa_user: str = ""
+    cwa_password: str = ""
+    cwa_verify_tls: bool = True
 
-    direction: str = "ebook_to_audio"
+    direction: str = "all"
     interval: int = 300
     dry_run: bool = True
     match_threshold: float = 0.72
@@ -110,8 +114,12 @@ class Config:
         self.calibre_library = os.getenv("CALIBRE_LIBRARY", "")
         self.cwa_app_db = os.getenv("CWA_APP_DB", "")
         self.cwa_user_id = _int("CWA_USER_ID", 0)
+        self.cwa_url = os.getenv("CWA_URL", "").strip()
+        self.cwa_user = os.getenv("CWA_USER", "").strip()
+        self.cwa_password = os.getenv("CWA_PASSWORD", "")
+        self.cwa_verify_tls = _bool("CWA_VERIFY_TLS", True)
 
-        self.direction = os.getenv("DIRECTION", "ebook_to_audio")
+        self.direction = os.getenv("DIRECTION", "all")
         self.interval = _int("INTERVAL", 300)
         self.dry_run = _bool("DRY_RUN", True)
         self.match_threshold = _float("MATCH_THRESHOLD", 0.72)
@@ -130,7 +138,7 @@ class Config:
         self.event_max_wait = _int("EVENT_MAX_WAIT", 120)
         events_env = os.getenv("ABS_EVENTS")
         if events_env is None:
-            self.abs_events = self.direction == "audio_to_ebook"
+            self.abs_events = self.direction in {"audio_to_ebook", "all"}
         else:
             self.abs_events = events_env.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -141,31 +149,63 @@ class Config:
         self.mqtt_prefix = os.getenv("MQTT_PREFIX", "paperwhisper").strip() or "paperwhisper"
         self.mqtt_discovery = os.getenv("MQTT_DISCOVERY", "homeassistant").strip() or "homeassistant"
 
+    def configured_backends(self) -> list[str]:
+        """Backends with enough config to *read* progress."""
+        out: list[str] = []
+        if self.abs_url and self.abs_token:
+            out.append("audiobookshelf")
+        if self.rmfakecloud_user:
+            out.append("remarkable")
+        if self.cwa_app_db and self.calibre_library:
+            out.append("calibreweb")
+        return out
+
+    def writable_backends(self) -> list[str]:
+        out: list[str] = []
+        if self.abs_url and self.abs_token:
+            out.append("audiobookshelf")
+        if self.rmfakecloud_user and self.rmfakecloud_url and self.rmfakecloud_device_token:
+            out.append("remarkable")
+        if self.cwa_app_db and self.calibre_library and self.cwa_url and self.cwa_user and self.cwa_password:
+            out.append("calibreweb")
+        return out
+
+    def source_backends(self) -> list[str]:
+        configured = self.configured_backends()
+        if self.direction == "ebook_to_audio":
+            return [b for b in configured if b != "audiobookshelf"]
+        if self.direction == "audio_to_ebook":
+            return [b for b in configured if b == "audiobookshelf"]
+        return configured
+
+    def target_backends(self) -> list[str]:
+        writable = self.writable_backends()
+        if self.direction == "ebook_to_audio":
+            return [b for b in writable if b == "audiobookshelf"]
+        if self.direction == "audio_to_ebook":
+            return [b for b in writable if b != "audiobookshelf"]
+        return writable
+
     def validate(self) -> list[str]:
         errs = []
-        if not self.rmfakecloud_user:
-            errs.append("RMFAKECLOUD_USER is required")
-        if not self.abs_url:
-            errs.append("ABS_URL is required")
-        if not self.abs_token:
-            errs.append("ABS_TOKEN is required")
         if self.direction not in DIRECTIONS:
             errs.append(f"DIRECTION={self.direction!r} must be one of {sorted(DIRECTIONS)}")
-        if self.ebook_provider not in {"remarkable", "calibreweb"}:
-            errs.append(f"EBOOK_PROVIDER={self.ebook_provider!r} must be 'remarkable' or 'calibreweb'")
-        if self.ebook_provider == "calibreweb":
+        backends = self.configured_backends()
+        if len(backends) < 2:
+            errs.append(
+                "configure at least two backends (Audiobookshelf, reMarkable, Calibre-Web)"
+            )
+        if "calibreweb" in backends:
             if not self.calibre_library:
-                errs.append("CALIBRE_LIBRARY is required for the calibreweb provider")
+                errs.append("CALIBRE_LIBRARY is required for Calibre-Web")
             if not self.cwa_app_db:
-                errs.append("CWA_APP_DB is required for the calibreweb provider")
-            if self.direction == "audio_to_ebook":
-                errs.append("the calibreweb provider only supports DIRECTION=ebook_to_audio (writing back to Calibre-Web is not implemented yet)")
-        if self.direction == "audio_to_ebook":
-            if not self.rmfakecloud_url:
-                errs.append("RMFAKECLOUD_URL is required for audio_to_ebook")
-            if not self.rmfakecloud_device_token:
-                errs.append(
-                    "audio_to_ebook needs a device token: set RMFAKECLOUD_DEVICE_TOKEN "
-                    "or mount an rmapi.conf and set RMAPI_CONFIG"
-                )
+                errs.append("CWA_APP_DB is required for Calibre-Web")
+        targets = self.target_backends()
+        if self.direction == "audio_to_ebook" and not targets:
+            errs.append(
+                "audio_to_ebook needs a writable ebook backend: reMarkable "
+                "(RMFAKECLOUD_URL + device token) and/or Calibre-Web (CWA_URL + CWA_USER + CWA_PASSWORD)"
+            )
+        if self.direction == "ebook_to_audio" and "audiobookshelf" not in targets:
+            errs.append("ebook_to_audio needs ABS_URL and ABS_TOKEN")
         return errs

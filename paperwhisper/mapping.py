@@ -111,6 +111,7 @@ class AlignedChapter:
 class MappingResult:
     page: int | None = None
     seconds: float | None = None
+    frac: float | None = None  # 0–1, for percentage targets (Calibre-Web)
     method: str = "percent"  # "chapter" | "percent"
     chapter_title: str = ""
     chapter_frac: float = 0.0
@@ -480,7 +481,7 @@ class PositionMapper:
     @classmethod
     def from_config(cls, cfg, abs_client, store=None) -> "PositionMapper":
         def chapters(item_id: str) -> list[AudioChapter]:
-            if not cfg.chapter_map:
+            if not cfg.chapter_map or abs_client is None:
                 return []
             try:
                 raw = abs_client.chapters(item_id) or []
@@ -589,4 +590,5 @@ class PositionMapper:
 
     def progress_to_seconds(self, progress: float, duration: float) -> MappingResult:
         t = percent_to_seconds(progress, duration, audio_lag=self.audio_lag)
-        return MappingResult(seconds=t, method="percent")
+        frac = (t / duration) if duration else 0.0
+        return MappingResult(seconds=t, frac=frac, method="percent")

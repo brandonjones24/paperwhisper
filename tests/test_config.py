@@ -26,6 +26,13 @@ def test_abs_events_defaults_off_for_ebook_to_audio():
     assert cfg.abs_events is False
 
 
+def test_direction_all_is_default():
+    _clear_event_env()
+    cfg = Config()
+    assert cfg.direction == "all"
+    assert cfg.abs_events is True
+
+
 def test_abs_events_explicit_false():
     _clear_event_env()
     os.environ["DIRECTION"] = "audio_to_ebook"
@@ -41,6 +48,19 @@ def test_chapter_map_defaults():
     assert cfg.chapter_map is True
     assert cfg.page_lag == 1
     assert cfg.audio_lag == 15
+
+
+def test_configured_backends_need_two():
+    _clear_event_env()
+    os.environ.pop("RMFAKECLOUD_USER", None)
+    os.environ.pop("ABS_URL", None)
+    os.environ.pop("ABS_TOKEN", None)
+    os.environ.pop("CWA_APP_DB", None)
+    os.environ.pop("CALIBRE_LIBRARY", None)
+    cfg = Config()
+    assert cfg.configured_backends() == []
+    errs = cfg.validate()
+    assert any("at least two backends" in e for e in errs)
 
 
 def test_chapter_map_env():

@@ -1,13 +1,19 @@
 # paperwhisper
 
-**Whispersync-style reading-progress sync** between a [reMarkable](https://remarkable.com/) tablet (via [rmfakecloud](https://github.com/ddvk/rmfakecloud)) and [Audiobookshelf](https://www.audiobookshelf.org/).
+**Whispersync-style reading-progress sync** across the devices you actually use:
 
-Listen to an audiobook, and the matching ebook on your reMarkable opens near the same spot. Read on the tablet, and Audiobookshelf picks up there. Self-hosted; no Kindle/Audible account.
+| Backend | Typical device | Reads | Writes |
+|---|---|---|---|
+| [Audiobookshelf](https://www.audiobookshelf.org/) | phone / speakers | listen position + chapters | listen position |
+| reMarkable via [rmfakecloud](https://github.com/ddvk/rmfakecloud) | tablet | open page + EPUB TOC | open page |
+| [Calibre-Web](https://github.com/janeczku/calibre-web) KOReader kosync | KOReader / Kobo | percentage | kosync progress |
+
+Every configured backend is a **peer**. paperwhisper matches the same book by title + author, takes whoever is furthest ahead, and updates the others. No backend is primary. Self-hosted; no Kindle/Audible account.
 
 > [!IMPORTANT]
 > This was vibecoded against one homelab. It works there. It is **not** security-audited.
-> `audio_to_ebook` **writes into rmfakecloud's sync store**. Keep `DRY_RUN=true` until
-> the logs look right, and keep a backup of rmfakecloud's data dir. MIT, issues/PRs welcome.
+> Writing a reMarkable page **changes rmfakecloud's sync store**. Keep `DRY_RUN=true` until
+> the logs look right, and keep a backup of that data dir. MIT, issues/PRs welcome.
 
 **Contents**
 
@@ -16,7 +22,6 @@ Listen to an audiobook, and the matching ebook on your reMarkable opens near the
 - [The logic](#the-logic)
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
-- [Ebook providers](#ebook-providers)
 - [Honest limitations](#honest-limitations)
 - [Roadmap](#roadmap)
 
@@ -24,16 +29,19 @@ Listen to an audiobook, and the matching ebook on your reMarkable opens near the
 
 ## What it does
 
-One process, one direction (`DIRECTION`):
+Enable any two or more backends. With `DIRECTION=all` (the default) they are equals:
 
-| Direction | You do this | paperwhisper does this | reMarkable store |
-|---|---|---|---|
-| **`ebook_to_audio`** | Read on the tablet | Sets Audiobookshelf to that spot | **read-only** |
-| **`audio_to_ebook`** | Listen in Audiobookshelf | Sets the ebook's open page in rmfakecloud | **writes** |
+```
+listen in Audiobookshelf  →  tablet + KOReader catch up
+read on the reMarkable    →  ABS + Calibre-Web catch up
+read in KOReader (CWA)    →  ABS + tablet catch up
+```
 
-To go both ways, run **two containers** with isolated state directories (see [step 9](#9-optional--run-both-directions)).
+`ALLOW_REWIND=false` means a target is only ever **advanced**, so a behind device never drags the others backward.
 
 The tablet is **not** pushed live. paperwhisper writes rmfakecloud; the Paper Pro pulls the new page the next time it syncs (wake / reconnect).
+
+`DIRECTION=ebook_to_audio` / `audio_to_ebook` still exist if you want to restrict which side may lead. You do **not** need two containers for bidirectional sync — one process with `DIRECTION=all` covers it.
 
 ---
 
@@ -42,31 +50,28 @@ The tablet is **not** pushed live. paperwhisper writes rmfakecloud; the Paper Pr
 Every pass is the same pipeline:
 
 ```
-1. Load ebooks (rmfakecloud blob store) and audiobooks (ABS API)
-2. Fuzzy-match each pair by title + author
-3. Map the source position onto the target (chapter-aware, then percent)
-4. Apply a small lag so the target is slightly *behind* the source
-5. Skip if it would rewind, or if the move is tiny
-6. Write (or log, if DRY_RUN=true)
+1. Load progress from every configured backend
+2. Cluster the same book across backends (fuzzy title + author)
+3. The furthest-ahead copy is the leader
+4. Map that position onto each laggard (chapter-aware, then percent)
+5. Apply a small lag so the target is slightly *behind* the leader
+6. Skip if it would rewind, or if the move is tiny
+7. Write (or log, if DRY_RUN=true)
 ```
 
 ```mermaid
 flowchart LR
-  subgraph sources [Sources]
-    ABS[Audiobookshelf]
-    RM[rmfakecloud / reMarkable]
-  end
+  ABS[Audiobookshelf]
+  RM[reMarkable / rmfakecloud]
+  CWA[Calibre-Web / KOReader]
   PW[paperwhisper]
-  ABS -->|"listen position + chapters"| PW
-  RM -->|"open page + EPUB TOC"| PW
-  PW -->|"set_progress"| ABS
-  PW -->|"lastOpenedPage / cPages UUID"| RM
+  ABS <--> PW
+  RM <--> PW
+  CWA <--> PW
   RM -->|"next wake/sync"| TAB[Tablet]
 ```
 
-**`audio_to_ebook` is event-driven.** paperwhisper subscribes to Audiobookshelf's Socket.io `user_item_progress_updated` stream, waits until listening has been quiet for `EVENT_DEBOUNCE` seconds (or `EVENT_MAX_WAIT` of continuous playback), then writes rmfakecloud. A backup poll (`INTERVAL`) still runs if the socket drops.
-
-**`ebook_to_audio` polls** every `INTERVAL` seconds (the tablet has no equivalent live event).
+When Audiobookshelf is in the mix, paperwhisper also subscribes to its Socket.io `user_item_progress_updated` stream, waits until listening has been quiet for `EVENT_DEBOUNCE` seconds (or `EVENT_MAX_WAIT` of continuous playback), then runs a pass. A backup poll (`INTERVAL`) still runs so tablet and KOReader progress are picked up too.
 
 ---
 
@@ -163,10 +168,12 @@ Writes: device token → user token → rewrite the leaf blobs → Merkle rollup
 ### 0. What you need
 
 - Docker with Compose.
-- [Audiobookshelf](https://www.audiobookshelf.org/) already running, with the same books as audiobooks.
-- [rmfakecloud](https://github.com/ddvk/rmfakecloud) already running, with those books as ebooks on the tablet.
-  - **Paper Pro:** use rmfakecloud's `installer-rmpro.sh`. That installs a local HTTPS proxy on the tablet (`localhost:443`). The tablet talks to rmfakecloud through that proxy — there is no MQTT live-push path for the Paper Pro.
-- The **same title** (close enough to fuzzy-match) on both sides. Sync one pair you care about first and watch the logs.
+- At least **two** of:
+  - [Audiobookshelf](https://www.audiobookshelf.org/) with the books as audiobooks
+  - [rmfakecloud](https://github.com/ddvk/rmfakecloud) with those books as ebooks on a reMarkable
+    - **Paper Pro:** use rmfakecloud's `installer-rmpro.sh` (local HTTPS proxy on the tablet). There is no MQTT live-push path for the Paper Pro.
+  - Calibre-Web with KOReader kosync (and the Calibre library files)
+- The **same title** (close enough to fuzzy-match) on each backend. Sync one book you care about first and watch the logs.
 
 ### 1. Clone
 
@@ -177,16 +184,17 @@ cp .env.example .env
 cp docker-compose.example.yml docker-compose.yml
 ```
 
-### 2. Pick a direction
+### 2. Enable peers
 
-Start with **one** direction. Read-only on the tablet is the safer first run:
+Use `DIRECTION=all` unless you have a reason to restrict who may lead:
 
 ```bash
 # in .env
-DIRECTION=ebook_to_audio    # tablet → Audiobookshelf (recommended first)
-# DIRECTION=audio_to_ebook  # Audiobookshelf → tablet (writes rmfakecloud)
+DIRECTION=all               # every configured backend is a peer (recommended)
 DRY_RUN=true
 ```
+
+A backend is **read** as soon as its connection settings are present. It is **written** only when write credentials are present (rmfakecloud device token, Calibre-Web kosync user/password). Start without write creds if you want a dry-run of matching only.
 
 ### 3. Fill in Audiobookshelf
 
@@ -220,12 +228,11 @@ volumes:
   - ./state:/state
 ```
 
-### 5. If you chose `audio_to_ebook`, add a device token
+### 5. To *write* the tablet, add a device token
 
-paperwhisper has to call rmfakecloud's HTTP API as a device.
+paperwhisper has to call rmfakecloud's HTTP API as a device. Without this, the tablet is still a **source** (read-only peer).
 
 ```bash
-DIRECTION=audio_to_ebook
 RMFAKECLOUD_URL=http://rmfakecloud:3050      # rmfakecloud HTTP API
 RMFAKECLOUD_DEVICE_TOKEN=paste-device-token
 ```
@@ -297,55 +304,31 @@ docker compose up -d
 docker compose logs -f
 ```
 
-Same MATCH lines, without `[DRY_RUN]`. For `audio_to_ebook`, pause the audiobook, wait ~20s, then **wake the tablet** (or wait for its next sync). The open page updates after that sync, not while you stare at an already-open book — close and reopen the ebook if it was already on screen.
+Same MATCH lines, without `[DRY_RUN]`. After listening, pause, wait ~20s, then **wake the tablet** (or wait for its next sync). The open page updates after that sync, not while you stare at an already-open book — close and reopen the ebook if it was already on screen.
 
-### 9. Optional — run both directions
+### 9. Optional — Calibre-Web / KOReader
 
-One process handles one direction. For both, run two services with **separate state dirs** (the state file is per-book and would otherwise overwrite itself):
-
-```yaml
-services:
-  paperwhisper-audio2ebook:
-    build: .
-    env_file: .env
-    environment:
-      - DIRECTION=audio_to_ebook
-      - DRY_RUN=false
-      - STATE_FILE=/state/paperwhisper.json
-    volumes:
-      - /path/to/rmfakecloud/data:/rmdata:ro
-      - ./state:/state
-    restart: unless-stopped
-
-  paperwhisper-ebook2audio:
-    build: .
-    env_file: .env
-    environment:
-      - DIRECTION=ebook_to_audio
-      - DRY_RUN=false
-      - STATE_FILE=/state/paperwhisper.json
-    volumes:
-      - /path/to/rmfakecloud/data:/rmdata:ro
-      - ./state-ebook2audio:/state
-    restart: unless-stopped
-```
-
-Bring the second one up in `DRY_RUN=true` first, same as step 6–8.
-
-`ALLOW_REWIND=false` on both sides is what stops them from fighting: each side only ever advances the other.
-
-### 10. Optional — Calibre-Web / KOReader (no reMarkable)
-
-If you read on KOReader (Kindle/Kobo/etc.) synced to Calibre-Web, paperwhisper can drive Audiobookshelf from that progress. Tablet writes are not implemented on this provider.
+Same peer as the others. Mount the Calibre library and CWA `app.db` to **read**; set URL + user + password to **write** (via `PUT /kosync/syncs/progress`).
 
 ```bash
-DIRECTION=ebook_to_audio
-EBOOK_PROVIDER=calibreweb
 CALIBRE_LIBRARY=/calibre-library
 CWA_APP_DB=/config/app.db
+CWA_URL=http://calibre-web:8083
+CWA_USER=your-cwa-user
+CWA_PASSWORD=…
 ```
 
-Mount the Calibre library (for `metadata.db` + ebook files) and Calibre-Web's `app.db`. Mapping is percentage + `AUDIO_LAG` only — there is no EPUB TOC path here.
+```yaml
+volumes:
+  - /path/to/rmfakecloud/data:/rmdata:ro
+  - /path/to/calibre/library:/calibre-library:ro
+  - /path/to/cwa/config/app.db:/config/app.db:ro
+  - ./state:/state
+```
+
+KOReader (and Kobo, via CWA) pick up the new percentage on their next sync. The Calibre-Web *browser* reader does not reliably resume from kosync — don't expect that.
+
+Chapter mapping uses the EPUB from the tablet **or** the Calibre library, plus ABS chapters, so KOReader is not stuck on raw percentage when those exist.
 
 ---
 
@@ -359,17 +342,18 @@ Full list: [`.env.example`](.env.example). Compose skeleton: [`docker-compose.ex
 | `RMFAKECLOUD_USER` | — | rmfakecloud username (`users/<user>`) |
 | `ABS_URL` / `ABS_TOKEN` | — | Audiobookshelf base URL + API token |
 | `ABS_VERIFY_TLS` | `true` | Verify HTTPS when ABS is TLS |
-| `DIRECTION` | `ebook_to_audio` | `ebook_to_audio` or `audio_to_ebook` |
-| `EBOOK_PROVIDER` | `remarkable` | `remarkable` or `calibreweb` |
-| `RMFAKECLOUD_URL` | — | rmfakecloud HTTP API (required to write) |
-| `RMFAKECLOUD_DEVICE_TOKEN` / `RMAPI_CONFIG` | — | device token for writes |
+| `DIRECTION` | `all` | `all` (peers), or restrict to `ebook_to_audio` / `audio_to_ebook` |
+| `RMFAKECLOUD_URL` | — | rmfakecloud HTTP API (required to write the tablet) |
+| `RMFAKECLOUD_DEVICE_TOKEN` / `RMAPI_CONFIG` | — | device token for tablet writes |
+| `CALIBRE_LIBRARY` / `CWA_APP_DB` | — | enable Calibre-Web as a peer (read) |
+| `CWA_URL` / `CWA_USER` / `CWA_PASSWORD` | — | enable Calibre-Web writes |
 | `INTERVAL` | `300` | Backup poll, seconds. `0` = events-only (or run-once) |
-| `ABS_EVENTS` | on for `audio_to_ebook` | Subscribe to ABS Socket.io progress events |
+| `ABS_EVENTS` | on for `all` / `audio_to_ebook` | Subscribe to ABS Socket.io progress events |
 | `EVENT_DEBOUNCE` | `20` | Quiet-listening seconds before writing rmfakecloud |
 | `EVENT_MAX_WAIT` | `120` | Force a write if events keep arriving this long |
 | `DRY_RUN` | `true` | Log intended changes; write nothing |
 | `MATCH_THRESHOLD` | `0.72` | Fuzzy title+author cutoff (0–1) |
-| `MIN_DELTA` | `0.01` | `ebook_to_audio`: min fractional move before writing |
+| `MIN_DELTA` | `0.01` | min fractional move before writing ABS / Calibre-Web |
 | `MIN_PAGE_DELTA` | `1` | `audio_to_ebook`: min page move before writing |
 | `MIN_PROGRESS` | `0.005` | Ignore items barely started |
 | `ALLOW_REWIND` | `false` | If false, only ever advance the target |
@@ -382,19 +366,6 @@ Full list: [`.env.example`](.env.example). Compose skeleton: [`docker-compose.ex
 
 ---
 
-## Ebook providers
-
-The ebook side is pluggable (`EBOOK_PROVIDER`). You don't need a reMarkable:
-
-| Provider | Reads progress from | Directions |
-|---|---|---|
-| **`remarkable`** (default) | rmfakecloud sync store (`lastOpenedPage` / `cPages`) | ebook ↔ audio |
-| **`calibreweb`** | Calibre-Web KOReader **`kosync`** progress (`app.db`) | ebook → audio |
-
-`calibreweb` hashes each Calibre library file with KOReader's partial-MD5, looks that hash up in `kosync_progress`, and maps the stored percentage onto the matching audiobook. `CALIBRE_LIBRARY` may list several libraries, comma-separated.
-
----
-
 ## Honest limitations
 
 - **Chapter-aware, not word-accurate.** Real Whispersync aligns audio to text. We pair chapters and interpolate. Narration pace still varies, so you land *near* the right spot — slightly behind by default — not on a specific word.
@@ -402,7 +373,8 @@ The ebook side is pluggable (`EBOOK_PROVIDER`). You don't need a reMarkable:
 - **`audio_to_ebook` writes the sync tree.** Every write is a compare-and-swap on the root generation. A bad root is rejected by the tablet (recoverable by restoring the previous root). Keep backups.
 - **Page counts appear after the tablet has indexed the book** (background, after sync — you usually don't need to open each book).
 - **The tablet must sync to see a new page.** Close/reopen the book if it was already open; in-memory position won't reload mid-read.
-- **Same book on both sides.** No match, no sync.
+- **Same book on at least two backends.** No match, no sync.
+- **Calibre-Web's browser reader** does not reliably resume from kosync. KOReader and Kobo do.
 
 ---
 
@@ -410,8 +382,6 @@ The ebook side is pluggable (`EBOOK_PROVIDER`). You don't need a reMarkable:
 
 - Live tablet push (Paper Pro HTTPS proxy) so a page update doesn't wait for wake/sync.
 - PDF outline / bookmark mapping.
-- Write-back for the `calibreweb` provider.
-- One process, both directions (namespaced state).
 - Hash-index caching for large Calibre libraries; manual match overrides.
 - Prometheus metrics.
 

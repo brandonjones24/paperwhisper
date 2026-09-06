@@ -26,20 +26,19 @@ def main() -> int:
             log.error("config error: %s", e)
         return 2
 
-    use_events = cfg.abs_events and cfg.direction == "audio_to_ebook"
+    use_events = cfg.abs_events and "audiobookshelf" in cfg.configured_backends()
     log.info(
-        "paperwhisper starting | direction=%s interval=%ss dry_run=%s "
-        "abs_events=%s debounce=%ss max_wait=%ss chapter_map=%s page_lag=%s "
-        "audio_lag=%ss user=%s abs=%s",
-        cfg.direction, cfg.interval, cfg.dry_run, use_events,
+        "paperwhisper starting | direction=%s backends=%s writable=%s "
+        "interval=%ss dry_run=%s abs_events=%s debounce=%ss max_wait=%ss "
+        "chapter_map=%s page_lag=%s audio_lag=%ss",
+        cfg.direction, cfg.configured_backends(), cfg.target_backends(),
+        cfg.interval, cfg.dry_run, use_events,
         cfg.event_debounce, cfg.event_max_wait, cfg.chapter_map, cfg.page_lag,
-        cfg.audio_lag, cfg.rmfakecloud_user, cfg.abs_url,
+        cfg.audio_lag,
     )
     if cfg.dry_run:
         log.info("DRY_RUN is on — no changes will be written. "
                  "Set DRY_RUN=false once you've confirmed the matches look right.")
-    if cfg.abs_events and cfg.direction != "audio_to_ebook":
-        log.info("ABS_EVENTS is only used for DIRECTION=audio_to_ebook; ignoring")
 
     if cfg.mqtt_host:
         mqtt_start(cfg)
@@ -56,8 +55,8 @@ def main() -> int:
         )
         listener.start()
         log.info(
-            "listening for ABS progress events; will write rmfakecloud after %ss quiet "
-            "(or %ss of continuous listening). The tablet picks up the page on its next sync.",
+            "listening for ABS progress events; will sync peers after %ss quiet "
+            "(or %ss of continuous listening).",
             cfg.event_debounce, cfg.event_max_wait,
         )
 

@@ -1,17 +1,9 @@
-"""Calibre-Web reading-progress provider (KOReader ``kosync``).
+"""Calibre-Web reading-progress peer (KOReader ``kosync``).
 
 Calibre-Web / calibre-web-automated stores KOReader sync progress in its
-``app.db`` table ``kosync_progress``:
-
-    user_id | document (KOReader partial-MD5 hash) | progress (xpointer) |
-    percentage (0.0-1.0) | device | timestamp
-
-The ``document`` is KOReader's *partial MD5* of the ebook file (md5 of 1 KiB
-chunks read at 0, 1024, 4096, 16384, ... byte offsets). To turn it into a
-title/author we compute the same hash for every file in the Calibre library
-(paths + metadata come from Calibre's ``metadata.db``) and match.
-
-Read-only: it only reads ``app.db`` and ``metadata.db``.
+``app.db`` table ``kosync_progress``. The ``document`` is KOReader's partial
+MD5 of the ebook file. Writes go through ``PUT /kosync/syncs/progress`` so
+CWA side effects (read status, Kobo) still fire.
 """
 
 from __future__ import annotations
@@ -20,7 +12,12 @@ import hashlib
 import logging
 import os
 import sqlite3
+from datetime import datetime, timezone
+from urllib.parse import urljoin
 
+import requests
+
+from .peers import PeerBook
 from .providers import EbookProgress
 
 log = logging.getLogger("paperwhisper.calibreweb")
@@ -64,18 +61,62 @@ def _split_libraries(value) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _as_frac(pct: float) -> float:
+    """CWA stores 0–100 after a kosync write; older rows / GET path use 0–1."""
+    if pct > 1.0:
+        pct = pct / 100.0
+    return max(0.0, min(1.0, pct))
+
+
+def _ts_ms(ts) -> int:
+    if ts is None:
+        return 0
+    if isinstance(ts, (int, float)):
+        v = int(ts)
+        return v if v > 1e12 else v * 1000
+    s = str(ts).strip()
+    if not s:
+        return 0
+    try:
+        if s.isdigit():
+            v = int(s)
+            return v if v > 1e12 else v * 1000
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except (TypeError, ValueError):
+        return 0
+
+
 class CalibreWebStore:
-    def __init__(self, app_db: str, calibre_library, user_id: int | None = None):
+    def __init__(
+        self,
+        app_db: str,
+        calibre_library,
+        user_id: int | None = None,
+        *,
+        base_url: str = "",
+        username: str = "",
+        password: str = "",
+        verify_tls: bool = True,
+    ):
         self.app_db = app_db
         self.libraries = _split_libraries(calibre_library)
         self.user_id = user_id
-        self._hash_index: dict[str, tuple[str, str]] | None = None
+        self.base_url = (base_url or "").rstrip("/") + ("/" if base_url else "")
+        self.username = username
+        self.password = password
+        self.verify_tls = verify_tls
+        self.can_write = bool(self.base_url and self.username and self.password)
+        self._hash_index: dict[str, tuple[str, str, str]] | None = None
+        self._id_index: dict[str, tuple[str, str, str]] | None = None
 
-    # -- map KOReader document hash -> (title, author) -------------------------
+    # -- map KOReader document hash -> (title, author, path) -------------------
 
-    def _library_files(self) -> list[tuple[str, str, str]]:
-        """Return (filepath, title, author) for every book file across all libraries."""
-        out: list[tuple[str, str, str]] = []
+    def _library_files(self) -> list[tuple[str, str, str, str]]:
+        """Return (book_id, filepath, title, author) for every library file."""
+        out: list[tuple[str, str, str, str]] = []
         for library in self.libraries:
             metadata_db = os.path.join(library, "metadata.db")
             try:
@@ -86,7 +127,7 @@ class CalibreWebStore:
             try:
                 rows = con.execute(
                     """
-                    SELECT b.title, b.path, d.name, d.format,
+                    SELECT b.id, b.title, b.path, d.name, d.format,
                            COALESCE(GROUP_CONCAT(a.name, ' & '), '')
                     FROM books b
                     JOIN data d ON d.book = b.id
@@ -101,25 +142,37 @@ class CalibreWebStore:
             finally:
                 con.close()
 
-            for title, path, name, fmt, author in rows:
+            for book_id, title, path, name, fmt, author in rows:
                 fpath = os.path.join(library, path, f"{name}.{str(fmt).lower()}")
                 if os.path.exists(fpath) and fpath.lower().endswith(_EBOOK_EXT):
-                    out.append((fpath, title, author))
+                    out.append((str(book_id), fpath, title, author))
         return out
 
-    def _build_hash_index(self) -> dict[str, tuple[str, str]]:
-        index: dict[str, tuple[str, str]] = {}
-        for fpath, title, author in self._library_files():
+    def _build_indexes(self) -> None:
+        hashes: dict[str, tuple[str, str, str]] = {}
+        ids: dict[str, tuple[str, str, str]] = {}
+        for book_id, fpath, title, author in self._library_files():
+            rec = (title, author, fpath)
+            ids.setdefault(book_id, rec)
             h = koreader_partial_md5(fpath)
             if h:
-                index[h] = (title, author)
-        log.info("Calibre-Web: hashed %d library files", len(index))
-        return index
+                hashes[h] = rec
+        log.info("Calibre-Web: hashed %d library files", len(hashes))
+        self._hash_index = hashes
+        self._id_index = ids
 
-    def hash_index(self) -> dict[str, tuple[str, str]]:
+    def hash_index(self) -> dict[str, tuple[str, str, str]]:
         if self._hash_index is None:
-            self._hash_index = self._build_hash_index()
-        return self._hash_index
+            self._build_indexes()
+        return self._hash_index or {}
+
+    def _lookup(self, document: str) -> tuple[str, str, str] | None:
+        idx = self.hash_index()
+        if document in idx:
+            return idx[document]
+        if self._id_index and document in self._id_index:
+            return self._id_index[document]
+        return None
 
     # -- read progress ---------------------------------------------------------
 
@@ -143,21 +196,109 @@ class CalibreWebStore:
             con.close()
 
         # keep the most recent row per document
-        latest: dict[str, tuple[float, str]] = {}
+        latest: dict[str, tuple[float, object]] = {}
         for document, percentage, _uid, ts in rows:
             if percentage is None:
                 continue
-            if document not in latest or (ts or "") > latest[document][1]:
-                latest[document] = (float(percentage), ts or "")
+            if document not in latest or _ts_ms(ts) >= _ts_ms(latest[document][1]):
+                latest[document] = (float(percentage), ts)
 
-        index = self.hash_index()
         items: list[EbookProgress] = []
         for document, (pct, _ts) in latest.items():
-            meta = index.get(document)
+            meta = self._lookup(str(document))
             if not meta:
                 log.debug("kosync document %s not matched to a library file", document)
                 continue
-            title, author = meta
-            items.append(EbookProgress(ident=document, title=title, author=author,
-                                       progress=max(0.0, min(1.0, pct))))
+            title, author, _path = meta
+            items.append(EbookProgress(ident=str(document), title=title, author=author,
+                                       progress=_as_frac(pct)))
         return items
+
+    def peer_books(self) -> list[PeerBook]:
+        try:
+            con = _connect_ro(self.app_db)
+        except sqlite3.Error as e:
+            log.error("cannot open Calibre-Web app.db at %s: %s", self.app_db, e)
+            return []
+        try:
+            q = "SELECT document, percentage, user_id, timestamp FROM kosync_progress"
+            params: tuple = ()
+            if self.user_id is not None:
+                q += " WHERE user_id = ?"
+                params = (self.user_id,)
+            rows = con.execute(q, params).fetchall()
+        except sqlite3.Error as e:
+            log.error("kosync_progress query failed: %s", e)
+            return []
+        finally:
+            con.close()
+
+        latest: dict[str, tuple[float, object]] = {}
+        for document, percentage, _uid, ts in rows:
+            if percentage is None:
+                continue
+            key = str(document)
+            if key not in latest or _ts_ms(ts) >= _ts_ms(latest[key][1]):
+                latest[key] = (float(percentage), ts)
+
+        out: list[PeerBook] = []
+        for document, (pct, ts) in latest.items():
+            meta = self._lookup(document)
+            if not meta:
+                log.debug("kosync document %s not matched to a library file", document)
+                continue
+            title, author, path = meta
+            out.append(
+                PeerBook(
+                    backend="calibreweb",
+                    ident=document,
+                    title=title,
+                    author=author,
+                    progress=_as_frac(pct),
+                    updated_ms=_ts_ms(ts),
+                    epub_hash=document if path.lower().endswith(".epub") else "",
+                    extra={"path": path},
+                )
+            )
+        return out
+
+    def epub_bytes(self, book) -> bytes | None:
+        path = ""
+        if isinstance(book, PeerBook):
+            path = (book.extra or {}).get("path") or ""
+            if not path:
+                meta = self._lookup(book.ident)
+                path = meta[2] if meta else ""
+        elif isinstance(book, str):
+            meta = self._lookup(book)
+            path = meta[2] if meta else ""
+        if not path or not path.lower().endswith(".epub"):
+            return None
+        try:
+            return open(path, "rb").read()
+        except OSError as e:
+            log.debug("cannot read epub %s: %s", path, e)
+            return None
+
+    def set_progress(self, document: str, percentage: float) -> None:
+        """Write via CWA kosync HTTP so ReadBook / Kobo side effects still run."""
+        if not self.can_write:
+            raise RuntimeError("Calibre-Web write needs CWA_URL, CWA_USER, CWA_PASSWORD")
+        frac = _as_frac(percentage)
+        payload = {
+            "document": document,
+            "progress": f"frac:{frac:.5f}",
+            "percentage": frac,
+            "device": "paperwhisper",
+            "device_id": "paperwhisper",
+        }
+        url = urljoin(self.base_url, "kosync/syncs/progress")
+        r = requests.put(
+            url,
+            json=payload,
+            auth=(self.username, self.password),
+            timeout=20,
+            verify=self.verify_tls,
+        )
+        r.raise_for_status()
+        log.info("CWA progress set: document=%s -> %.1f%%", document, frac * 100)
