@@ -26,6 +26,12 @@ It matches each ebook to an audiobook by fuzzy **title + author**, converts the
 source position to a fraction, and maps it onto the target's own scale
 (`fraction × audiobook_duration`, or `fraction × ebook_pageCount`).
 
+`audio_to_ebook` is **event-driven**: paperwhisper subscribes to Audiobookshelf's
+Socket.io `user_item_progress_updated` stream, waits until listening goes quiet
+(or a max-wait cap), and writes the matching ebook's page into rmfakecloud. The
+tablet is **not** pushed live — it retrieves the new page the next time it syncs
+(wake / reconnect). A backup poll (`INTERVAL`) still runs in case the socket drops.
+
 ## Ebook providers
 
 The ebook side is pluggable (`EBOOK_PROVIDER`), so you **don't need a reMarkable** to
@@ -106,7 +112,10 @@ See [`.env.example`](.env.example). Key variables:
 | `DIRECTION` | `ebook_to_audio` | `ebook_to_audio` or `audio_to_ebook` |
 | `RMFAKECLOUD_URL` | — | rmfakecloud HTTP API (required for `audio_to_ebook`) |
 | `RMFAKECLOUD_DEVICE_TOKEN` / `RMAPI_CONFIG` | — | device token for writing (required for `audio_to_ebook`) |
-| `INTERVAL` | `300` | Seconds between passes; `0` = run once |
+| `INTERVAL` | `300` | Backup poll (seconds); `0` = events-only (or run-once if events off) |
+| `ABS_EVENTS` | on for `audio_to_ebook` | Subscribe to ABS Socket.io progress events |
+| `EVENT_DEBOUNCE` | `20` | Seconds of quiet listening before writing rmfakecloud |
+| `EVENT_MAX_WAIT` | `120` | Force a write if events keep arriving this long |
 | `DRY_RUN` | `true` | Log intended changes without writing |
 | `MATCH_THRESHOLD` | `0.72` | Fuzzy match cutoff (0–1) |
 | `MIN_DELTA` | `0.01` | `ebook_to_audio`: min fractional move before writing |
@@ -130,10 +139,13 @@ root                -> hash of the root index blob
   `sha256(root content)`.
 - Writes use the sync API: exchange the device token for a user token, `GET/PUT
   /sync/v3/files/:hash` for blobs, `PUT /sync/v3/root` (CAS on generation, with
-  `Broadcast` so the tablet re-syncs).
+  `Broadcast` so the tablet is notified). The Paper Pro still applies that on
+  its next sync — typically when it wakes — rather than live over MQTT.
 
 ## Roadmap
 
+- Live tablet push (MQTT through the Paper Pro HTTPS proxy) so page updates
+  arrive without waiting for wake/sync.
 - Chapter-aware mapping (EPUB TOC ↔ audiobook chapters) for better accuracy.
 - Write-back for the `calibreweb` provider (audio → Calibre-Web reading position).
 - Hash-index caching for large Calibre libraries; manual match overrides.

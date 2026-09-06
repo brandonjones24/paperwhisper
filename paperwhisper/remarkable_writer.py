@@ -196,17 +196,28 @@ class RemarkableSyncWriter:
         doc_schema, file_entries = _parse_index(self.get_blob(doc_entry.hash).decode(errors="replace"))
         targets = [".metadata"] + ([".content"] if also_content else [])
         changed = False
+        from .remarkable import apply_opened_page
 
         for ext in targets:
             fe = next((e for e in file_entries if e.name.endswith(ext)), None)
             if fe is None:
                 continue
             data = json.loads(self.get_blob(fe.hash).decode())
-            if int(data.get("lastOpenedPage", -1)) == page:
-                continue
-            data["lastOpenedPage"] = page
-            if ext == ".metadata":
+            blob_changed = False
+            if ext == ".content":
+                blob_changed = apply_opened_page(data, page)
+            else:
+                try:
+                    current = int(data.get("lastOpenedPage", -1))
+                except (TypeError, ValueError):
+                    current = -1
+                if current != page:
+                    data["lastOpenedPage"] = page
+                    blob_changed = True
                 data["lastModified"] = str(int(time.time() * 1000))
+                blob_changed = True
+            if not blob_changed:
+                continue
             new_bytes = json.dumps(data).encode()
             new_hash = _sha256_hex(new_bytes)
             self.put_blob(new_hash, new_bytes, filename=fe.name)

@@ -22,6 +22,7 @@ from pathlib import Path
 from .audiobookshelf import ABSItem, AudiobookshelfClient
 from .config import Config
 from .matcher import best_match
+from .mqttpub import emit as mqtt_emit
 from .remarkable import RemarkableBook, RemarkableStore
 from .remarkable_writer import ConflictError, RemarkableSyncWriter
 
@@ -122,6 +123,13 @@ def _run_ebook_to_audio(cfg: Config) -> int:
                     log.error("failed to update %r: %s", match.title, e)
                     continue
             updates += 1
+            mqtt_emit({
+                "title": match.title,
+                "progress_pct": round(book.progress * 100, 1),
+                "updates": updates,
+                "dry_run": cfg.dry_run,
+                "detail": f"ebook {book.progress:.1%} -> {target:.0f}s",
+            })
         state.record(book.ident, ebook_frac=frac)
     state.save()
     log.info("pass complete: %d update(s)%s", updates, " (dry-run)" if cfg.dry_run else "")
@@ -175,6 +183,13 @@ def _run_audio_to_ebook(cfg: Config) -> int:
                 updates += 1
             else:
                 continue
+        mqtt_emit({
+            "title": book.title,
+            "progress_pct": round(match.progress * 100, 1),
+            "updates": updates,
+            "dry_run": cfg.dry_run,
+            "detail": f"audio {match.progress:.1%} -> page {target_page}/{book.page_count}",
+        })
         state.record(book.uuid, abs_current=round(match.current_time), ebook_page=target_page)
 
     state.save()

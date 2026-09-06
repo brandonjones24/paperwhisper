@@ -19,9 +19,13 @@ services:
       #   - RMFAKECLOUD_DEVICE_TOKEN=${RMFAKECLOUD_DEVICE_TOKEN}
       #   (or mount an rmapi.conf and set RMAPI_CONFIG=/rmapi/rmapi.conf)
 
-      - INTERVAL=300
+      - INTERVAL=300            # backup poll; audio_to_ebook also listens to ABS Socket.io
       - DRY_RUN=true            # flip to false once matches look right
       - LOG_LEVEL=INFO
+      # audio_to_ebook events (defaults on for that direction):
+      # - ABS_EVENTS=true
+      # - EVENT_DEBOUNCE=20
+      # - EVENT_MAX_WAIT=120
     volumes:
       # rmfakecloud data dir (READ-ONLY). Point at the host path containing users/<user>/sync
       - /path/to/rmfakecloud/data:/rmdata:ro

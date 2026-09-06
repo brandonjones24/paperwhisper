@@ -158,16 +158,19 @@ class RemarkableStore:
             if not title:
                 continue
 
+            page_count = int(content.get("pageCount") or content.get("originalPageCount") or 0)
+            cpages = content.get("cPages") if isinstance(content.get("cPages"), dict) else None
+            if cpages and isinstance(cpages.get("pages"), list) and cpages["pages"]:
+                page_count = max(page_count, len(cpages["pages"]))
+
             out.append(
                 RemarkableBook(
                     uuid=uuid or title,
                     title=title,
                     authors=[str(a).strip() for a in authors],
                     file_type=file_type,
-                    page_count=int(content.get("pageCount") or content.get("originalPageCount") or 0),
-                    last_opened_page=int(
-                        meta.get("lastOpenedPage") or content.get("lastOpenedPage") or 0
-                    ),
+                    page_count=page_count,
+                    last_opened_page=opened_page_from_doc(meta, content),
                     last_modified_ms=last_modified,
                 )
             )
@@ -189,3 +192,72 @@ class RemarkableStore:
 def _strip_author(visible_name: str) -> str:
     """``"Title - Author"`` visibleName -> best-effort title."""
     return visible_name.split(" - ")[0].strip() if visible_name else ""
+
+
+def _page_id(entry) -> str | None:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return entry.get("id") or entry.get("uuid") or entry.get("value")
+    return None
+
+
+def opened_page_from_doc(meta: dict, content: dict) -> int:
+    """Page the tablet reader will actually open.
+
+    Paper Pro converted EPUBs store the open page as ``cPages.lastOpened.value``
+    (a page UUID). Integer ``lastOpenedPage`` is what older docs / HP-style
+    ``pages`` lists use. Prefer cPages when present.
+    """
+    content = content or {}
+    meta = meta or {}
+    cp = content.get("cPages") if isinstance(content.get("cPages"), dict) else None
+    if cp:
+        pages = cp.get("pages") or []
+        lo = cp.get("lastOpened") if isinstance(cp.get("lastOpened"), dict) else {}
+        uid = lo.get("value")
+        if uid and pages:
+            for i, p in enumerate(pages):
+                if _page_id(p) == uid:
+                    return i
+    try:
+        return int(meta.get("lastOpenedPage") or content.get("lastOpenedPage") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def bump_crdt_ts(ts: str | None) -> str:
+    """Increment a remarkable CRDT timestamp (``client:clock``)."""
+    if isinstance(ts, str) and ":" in ts:
+        head, clock = ts.split(":", 1)
+        try:
+            return f"{head}:{int(clock) + 1}"
+        except ValueError:
+            pass
+    return "1:99"
+
+
+def apply_opened_page(content: dict, page: int) -> bool:
+    """Mutate ``.content`` so the reader opens at ``page``. True if anything changed."""
+    changed = False
+    try:
+        current = int(content.get("lastOpenedPage", -1))
+    except (TypeError, ValueError):
+        current = -1
+    if current != page:
+        content["lastOpenedPage"] = page
+        changed = True
+    cp = content.get("cPages")
+    if not isinstance(cp, dict):
+        return changed
+    pages = cp.get("pages") or []
+    if not (0 <= page < len(pages)):
+        return changed
+    pid = _page_id(pages[page])
+    if not pid:
+        return changed
+    lo = cp.get("lastOpened") if isinstance(cp.get("lastOpened"), dict) else {}
+    if lo.get("value") != pid:
+        cp["lastOpened"] = {"timestamp": bump_crdt_ts(lo.get("timestamp")), "value": pid}
+        changed = True
+    return changed

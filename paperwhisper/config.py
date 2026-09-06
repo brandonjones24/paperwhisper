@@ -79,6 +79,20 @@ class Config:
     state_file: str = "/state/paperwhisper.json"
     log_level: str = "INFO"
 
+    # audio_to_ebook: ABS Socket.io instead of (or in addition to) polling.
+    # Default on for audio_to_ebook; ignored for ebook_to_audio.
+    abs_events: bool = False
+    event_debounce: int = 20         # seconds of quiet listening before writing
+    event_max_wait: int = 120        # force a write if events keep arriving
+
+    # Optional: publish sync events to an existing MQTT broker (HA Mosquitto).
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_password: str = ""
+    mqtt_prefix: str = "paperwhisper"
+    mqtt_discovery: str = "homeassistant"
+
     def __post_init__(self):
         self.rmfakecloud_data = os.getenv("RMFAKECLOUD_DATA", "/rmdata")
         self.rmfakecloud_user = os.getenv("RMFAKECLOUD_USER", "")
@@ -105,6 +119,21 @@ class Config:
 
         self.state_file = os.getenv("STATE_FILE", "/state/paperwhisper.json")
         self.log_level = os.getenv("LOG_LEVEL", "INFO")
+
+        self.event_debounce = _int("EVENT_DEBOUNCE", 20)
+        self.event_max_wait = _int("EVENT_MAX_WAIT", 120)
+        events_env = os.getenv("ABS_EVENTS")
+        if events_env is None:
+            self.abs_events = self.direction == "audio_to_ebook"
+        else:
+            self.abs_events = events_env.strip().lower() in {"1", "true", "yes", "on"}
+
+        self.mqtt_host = os.getenv("MQTT_HOST", "").strip()
+        self.mqtt_port = _int("MQTT_PORT", 1883)
+        self.mqtt_user = os.getenv("MQTT_USER", "").strip()
+        self.mqtt_password = os.getenv("MQTT_PASSWORD", "")
+        self.mqtt_prefix = os.getenv("MQTT_PREFIX", "paperwhisper").strip() or "paperwhisper"
+        self.mqtt_discovery = os.getenv("MQTT_DISCOVERY", "homeassistant").strip() or "homeassistant"
 
     def validate(self) -> list[str]:
         errs = []
