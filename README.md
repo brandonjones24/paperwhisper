@@ -31,9 +31,9 @@ One process, one direction (`DIRECTION`):
 | **`ebook_to_audio`** | Read on the tablet | Sets Audiobookshelf to that spot | **read-only** |
 | **`audio_to_ebook`** | Listen in Audiobookshelf | Sets the ebook's open page in rmfakecloud | **writes** |
 
-To go both ways, run **two containers** with isolated state directories (see [step 10](#10-optional--run-both-directions)).
+To go both ways, run **two containers** with isolated state directories (see [step 9](#9-optional--run-both-directions)).
 
-The tablet is **not** pushed live. paperwhisper writes rmfakecloud; the Paper Pro pulls the new page the next time it syncs (wake / reconnect). MQTT to Home Assistant is optional status only — it does not drive the tablet.
+The tablet is **not** pushed live. paperwhisper writes rmfakecloud; the Paper Pro pulls the new page the next time it syncs (wake / reconnect).
 
 ---
 
@@ -120,7 +120,7 @@ The MATCH log tells you which tier ran:
 
 ### 3. Land slightly behind
 
-You asked the ebook to be a page behind so you turn **forward**, not back. Defaults:
+The target is a page behind so you turn **forward**, not back. Defaults:
 
 | Knob | Default | Meaning |
 |---|---|---|
@@ -193,7 +193,7 @@ DRY_RUN=true
 In Audiobookshelf: **Settings → Users → your user → API Token**.
 
 ```bash
-ABS_URL=http://audiobookshelf:13378    # whatever reaches ABS from the container
+ABS_URL=http://audiobookshelf:13378   # hostname that reaches ABS from this container
 ABS_TOKEN=paste-the-api-token
 ```
 
@@ -226,7 +226,7 @@ paperwhisper has to call rmfakecloud's HTTP API as a device.
 
 ```bash
 DIRECTION=audio_to_ebook
-RMFAKECLOUD_URL=http://rmfakecloud:3050     # rmfakecloud HTTP API
+RMFAKECLOUD_URL=http://rmfakecloud:3050      # rmfakecloud HTTP API
 RMFAKECLOUD_DEVICE_TOKEN=paste-device-token
 ```
 
@@ -299,22 +299,7 @@ docker compose logs -f
 
 Same MATCH lines, without `[DRY_RUN]`. For `audio_to_ebook`, pause the audiobook, wait ~20s, then **wake the tablet** (or wait for its next sync). The open page updates after that sync, not while you stare at an already-open book — close and reopen the ebook if it was already on screen.
 
-### 9. Optional — Home Assistant MQTT
-
-This publishes sync status as an HA device. It does **not** replace rmfakecloud and it does **not** push pages to the Paper Pro.
-
-```bash
-MQTT_HOST=mqtt.example
-MQTT_PORT=1883
-MQTT_USER=
-MQTT_PASSWORD=…
-MQTT_PREFIX=paperwhisper
-MQTT_DISCOVERY=homeassistant
-```
-
-Restart. Sensors appear under device `paperwhisper` via MQTT discovery.
-
-### 10. Optional — run both directions
+### 9. Optional — run both directions
 
 One process handles one direction. For both, run two services with **separate state dirs** (the state file is per-book and would otherwise overwrite itself):
 
@@ -349,7 +334,7 @@ Bring the second one up in `DRY_RUN=true` first, same as step 6–8.
 
 `ALLOW_REWIND=false` on both sides is what stops them from fighting: each side only ever advances the other.
 
-### 11. Optional — Calibre-Web / KOReader (no reMarkable)
+### 10. Optional — Calibre-Web / KOReader (no reMarkable)
 
 If you read on KOReader (Kindle/Kobo/etc.) synced to Calibre-Web, paperwhisper can drive Audiobookshelf from that progress. Tablet writes are not implemented on this provider.
 
@@ -393,7 +378,7 @@ Full list: [`.env.example`](.env.example). Compose skeleton: [`docker-compose.ex
 | `AUDIO_LAG` | `15` | Seconds to land behind the mapped time |
 | `STATE_FILE` | `/state/paperwhisper.json` | Last-pushed positions |
 | `LOG_LEVEL` | `INFO` | `DEBUG` to see rewind skips |
-| `MQTT_HOST` | empty | Set to enable HA MQTT status |
+| `MQTT_HOST` | empty | Set to enable MQTT status |
 
 ---
 

@@ -1,10 +1,7 @@
-"""Publish paperwhisper sync events to an MQTT broker (Home Assistant).
+"""Optional MQTT status publisher.
 
-This is a *client* to your existing broker (e.g. HA Mosquitto). It is not
-rmfakecloud's tablet MQTT. Disabled unless MQTT_HOST is set.
-
-Uses Home Assistant MQTT discovery so sensors appear under one device
-without editing configuration.yaml.
+A client to an existing broker — not rmfakecloud tablet MQTT.
+Disabled unless MQTT_HOST is set.
 """
 
 from __future__ import annotations

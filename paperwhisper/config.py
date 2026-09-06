@@ -88,7 +88,7 @@ class Config:
     event_debounce: int = 20         # seconds of quiet listening before writing
     event_max_wait: int = 120        # force a write if events keep arriving
 
-    # Optional: publish sync events to an existing MQTT broker (HA Mosquitto).
+    # Optional MQTT status. Disabled unless MQTT_HOST is set.
     mqtt_host: str = ""
     mqtt_port: int = 1883
     mqtt_user: str = ""
