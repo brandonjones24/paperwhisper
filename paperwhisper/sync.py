@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 
 from .audiobookshelf import AudiobookshelfClient
@@ -94,6 +95,38 @@ def build_backends(cfg: Config) -> dict[str, object]:
     return out
 
 
+def _target_metric(peer: PeerBook):
+    """The comparable "how far along" value for a peer, in its own backend's units."""
+    if peer.backend == "remarkable":
+        return peer.last_opened_page
+    if peer.backend == "audiobookshelf":
+        return peer.current_time
+    return peer.progress
+
+
+def _regressed_targets(cluster: dict[str, PeerBook], targets: set[str], applied: dict) -> list[str]:
+    """Writable targets whose live position has fallen below what we last wrote there.
+
+    A device (or anything else) touching the doc after we wrote it can revert
+    the position; when that happens the leader may not have moved, so the
+    normal "did the leader move" skip would otherwise never notice.
+    """
+    out = []
+    for name in targets:
+        peer = cluster.get(name)
+        if peer is None:
+            continue
+        want = applied.get(name)
+        if want is None:
+            continue
+        have = _target_metric(peer)
+        if have is None:
+            continue
+        if have < want:
+            out.append(name)
+    return out
+
+
 def _epub_loader(backends: dict, cluster: dict[str, PeerBook]):
     def load(_book):
         for name, peer in cluster.items():
@@ -161,8 +194,37 @@ def run_once(cfg: Config, backends: dict | None = None) -> int:
 
         key = cluster_key(cluster)
         frac = round(leader.progress, 4)
-        if state.get(key).get("leader_frac") == frac and state.get(key).get("leader") == f"{leader.backend}:{leader.ident}":
+        prev = state.get(key)
+        applied = dict(prev.get("applied", {})) if isinstance(prev, dict) else {}
+        same_leader = prev.get("leader_frac") == frac and prev.get("leader") == f"{leader.backend}:{leader.ident}"
+        regressed = _regressed_targets(cluster, targets - {leader.backend}, applied)
+
+        now = time.time()
+        flap_history = [t for t in prev.get("flap_history", []) if now - t <= cfg.flap_window] if isinstance(prev, dict) else []
+
+        if not same_leader:
+            # Real forward progress from the leader always gets synced, cooldown or not.
+            pass
+        elif not regressed:
             continue
+        else:
+            last_fix = flap_history[-1] if flap_history else None
+            in_cooldown = last_fix is not None and (now - last_fix) < cfg.regression_cooldown
+            if len(flap_history) >= cfg.flap_threshold:
+                log.warning(
+                    "FLAPPING %r: %s has reverted %d time(s) in the last %.0fs; "
+                    "the device may have this book open and re-saving a stale position",
+                    leader.title, ", ".join(sorted(regressed)), len(flap_history), cfg.flap_window,
+                )
+            if in_cooldown:
+                state.record(key, leader=prev.get("leader", f"{leader.backend}:{leader.ident}"),
+                             leader_frac=prev.get("leader_frac", frac), applied=applied, flap_history=flap_history)
+                continue
+            log.info(
+                "REGRESSION %r: %s fell behind last-applied position; re-pushing furthest known progress",
+                leader.title, ", ".join(sorted(regressed)),
+            )
+        is_regression_pass = same_leader and bool(regressed)
 
         mapper._epub_loader = _epub_loader(backends, cluster)
         mapper._toc_cache = {}
@@ -199,6 +261,9 @@ def run_once(cfg: Config, backends: dict | None = None) -> int:
                 if be.apply(peer, mapped):
                     updates += 1
                     wrote_any = True
+                    applied[name] = mapped.page if mapped.page is not None else (
+                        mapped.seconds if mapped.seconds is not None else mapped.frac
+                    )
             except Exception as e:  # noqa: BLE001
                 log.error("failed to update %s %r: %s", name, peer.title, e)
 
@@ -210,8 +275,12 @@ def run_once(cfg: Config, backends: dict | None = None) -> int:
                 "dry_run": cfg.dry_run,
                 "detail": f"{leader.backend} {leader.progress:.1%} -> {', '.join(sorted(cluster))}",
             })
-        state.record(key, leader=f"{leader.backend}:{leader.ident}", leader_frac=frac)
+        if is_regression_pass and wrote_any and not cfg.dry_run:
+            flap_history = flap_history + [now]
+        state.record(key, leader=f"{leader.backend}:{leader.ident}", leader_frac=frac,
+                     applied=applied, flap_history=flap_history)
 
     state.save()
     log.info("pass complete: %d update(s)%s", updates, " (dry-run)" if cfg.dry_run else "")
     return updates
+

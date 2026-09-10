@@ -79,9 +79,17 @@ class Config:
     min_page_delta: int = 1          # audio_to_ebook: min page move -> reMarkable
     min_progress: float = 0.005      # ignore items barely started
     allow_rewind: bool = False       # if False, only ever advance the target
-    chapter_map: bool = True         # ABS chapters ↔ EPUB TOC when they pair
+    chapter_map: bool = True         # ABS chapters â EPUB TOC when they pair
     page_lag: int = 1                # land this many pages behind the mapped page
     audio_lag: float = 15.0          # land this many seconds behind the mapped time
+
+    # A target (e.g. the reMarkable) can regress if something else (the device's
+    # own sync) overwrites what we last wrote. We always re-push the furthest
+    # known position when that happens, but two safeguards keep that from
+    # turning into a write storm against a target that keeps reverting itself:
+    regression_cooldown: float = 60.0   # min seconds between regression-triggered re-pushes, per cluster
+    flap_window: float = 600.0          # rolling window for counting reverts
+    flap_threshold: int = 3             # reverts within the window that trigger a FLAPPING warning
 
     state_file: str = "/state/paperwhisper.json"
     log_level: str = "INFO"
@@ -130,6 +138,10 @@ class Config:
         self.chapter_map = _bool("CHAPTER_MAP", True)
         self.page_lag = max(0, _int("PAGE_LAG", 1))
         self.audio_lag = max(0.0, _float("AUDIO_LAG", 15))
+
+        self.regression_cooldown = max(0.0, _float("REGRESSION_COOLDOWN", 60))
+        self.flap_window = max(0.0, _float("FLAP_WINDOW", 600))
+        self.flap_threshold = max(1, _int("FLAP_THRESHOLD", 3))
 
         self.state_file = os.getenv("STATE_FILE", "/state/paperwhisper.json")
         self.log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -209,3 +221,4 @@ class Config:
         if self.direction == "ebook_to_audio" and "audiobookshelf" not in targets:
             errs.append("ebook_to_audio needs ABS_URL and ABS_TOKEN")
         return errs
+
