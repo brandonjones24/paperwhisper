@@ -169,10 +169,7 @@ class RemarkableStore:
             if not title:
                 continue
 
-            page_count = int(content.get("pageCount") or content.get("originalPageCount") or 0)
-            cpages = content.get("cPages") if isinstance(content.get("cPages"), dict) else None
-            if cpages and isinstance(cpages.get("pages"), list) and cpages["pages"]:
-                page_count = max(page_count, len(cpages["pages"]))
+            page_count = _derive_page_count(content)
 
             out.append(
                 RemarkableBook(
@@ -206,6 +203,27 @@ def _strip_author(visible_name: str) -> str:
     return visible_name.split(" - ")[0].strip() if visible_name else ""
 
 
+def _derive_page_count(content: dict) -> int:
+    """The book's real page count.
+
+    ``pageCount`` (or ``cPages.original.value``, same thing under a
+    different name) is authoritative. ``len(cPages.pages)`` is NOT a
+    reliable fallback: past edits leave deleted tombstone entries mixed
+    into that list, so its raw length can overstate the real count.
+    """
+    page_count = int(content.get("pageCount") or content.get("originalPageCount") or 0)
+    cpages = content.get("cPages") if isinstance(content.get("cPages"), dict) else None
+    if not page_count and cpages:
+        original = cpages.get("original")
+        if isinstance(original, dict) and isinstance(original.get("value"), int):
+            page_count = original["value"]
+    if not page_count and cpages and isinstance(cpages.get("pages"), list) and cpages["pages"]:
+        pages = cpages["pages"]
+        live = sum(1 for p in pages if isinstance(p, dict) and "deleted" not in p)
+        page_count = live or len(pages)
+    return page_count
+
+
 def _page_id(entry) -> str | None:
     if isinstance(entry, str):
         return entry
@@ -220,6 +238,13 @@ def opened_page_from_doc(meta: dict, content: dict) -> int:
     Paper Pro converted EPUBs store the open page as ``cPages.lastOpened.value``
     (a page UUID). Integer ``lastOpenedPage`` is what older docs / HP-style
     ``pages`` lists use. Prefer cPages when present.
+
+    A ``cPages.pages`` entry's own array position isn't necessarily its real
+    page number: past edits leave behind ``deleted`` tombstone entries mixed
+    into the list, and every entry (live or tombstoned) carries a ``redir``
+    field pointing at the real page it represents (for live entries this
+    equals its own index; for tombstones it points elsewhere). Prefer that
+    over the raw array index.
     """
     content = content or {}
     meta = meta or {}
@@ -231,6 +256,9 @@ def opened_page_from_doc(meta: dict, content: dict) -> int:
         if uid and pages:
             for i, p in enumerate(pages):
                 if _page_id(p) == uid:
+                    redir = p.get("redir") if isinstance(p, dict) else None
+                    if isinstance(redir, dict) and isinstance(redir.get("value"), int):
+                        return redir["value"]
                     return i
     try:
         return int(meta.get("lastOpenedPage") or content.get("lastOpenedPage") or 0)
@@ -249,6 +277,25 @@ def bump_crdt_ts(ts: str | None) -> str:
     return "1:99"
 
 
+def _live_entry_for_page(pages: list, page: int):
+    """The cPages entry that really represents real page ``page``.
+
+    Prefer a live (non-deleted) entry whose ``redir`` says it's page ``page``
+    -- this is correct regardless of where tombstones from past edits happen
+    to sit in the list. Falls back to the raw array index for older/simpler
+    docs that don't carry ``redir`` at all.
+    """
+    for p in pages:
+        if not isinstance(p, dict) or "deleted" in p:
+            continue
+        redir = p.get("redir")
+        if isinstance(redir, dict) and redir.get("value") == page:
+            return p
+    if 0 <= page < len(pages):
+        return pages[page]
+    return None
+
+
 def apply_opened_page(content: dict, page: int) -> bool:
     """Mutate ``.content`` so the reader opens at ``page``. True if anything changed."""
     changed = False
@@ -263,9 +310,10 @@ def apply_opened_page(content: dict, page: int) -> bool:
     if not isinstance(cp, dict):
         return changed
     pages = cp.get("pages") or []
-    if not (0 <= page < len(pages)):
+    entry = _live_entry_for_page(pages, page)
+    if entry is None:
         return changed
-    pid = _page_id(pages[page])
+    pid = _page_id(entry)
     if not pid:
         return changed
     lo = cp.get("lastOpened") if isinstance(cp.get("lastOpened"), dict) else {}
@@ -273,3 +321,4 @@ def apply_opened_page(content: dict, page: int) -> bool:
         cp["lastOpened"] = {"timestamp": bump_crdt_ts(lo.get("timestamp")), "value": pid}
         changed = True
     return changed
+
